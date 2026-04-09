@@ -11,7 +11,9 @@ import SwiftUI
 struct FidgetPixApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            CanvasOverlayView()
         }
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 1200, height: 900)
     }
 }

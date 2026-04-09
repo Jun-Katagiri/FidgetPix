@@ -1,0 +1,149 @@
+承知いたしました。それでしたら、`Canvas` を使用し、グラフィックスコンテキストに直接画像を「焼き付けて」いくアプローチが最適です。
+
+「描画された画像は管理しない（配列などに保存しない）」という要件ですが、Canvasで描画を残し続けるためには、宣言的なSwiftUIの仕組み上、少し工夫が必要です。通常、Canvasは再描画（再レンダリング）が走ると中身がクリアされてしまいます。
+
+「過去の描画を保持しつつ、新しい絵を上書きしていく」ためには、**`Image`（または `NSImage`）自体を状態として保持し、その画像に対して新しい画像を書き込んでいく**という設計にします。
+
+以下にその実装設計を提示します。
+
+### 1. 設計コンセプト
+
+* **状態管理 (`@State`)**: 画面全体を表す「一枚のキャンバス画像（`NSImage`）」を保持します。
+* **キーマッピング**: 以前の設計通り、キーと画像のペアを辞書で保持します。
+* **描画プロセス**:
+    1.  キー押下を検知。
+    2.  対応する画像とランダムな座標を決定。
+    3.  **現在の「キャンバス画像」をコンテキストとして開く。**
+    4.  そこへ新しい画像を、指定座標に描画（上書き）。
+    5.  CanvasViewは、更新された「キャンバス画像」を表示するだけ。
+
+### 2. 実装イメージ
+
+macOS用の画像操作（`NSImage`）を使用するため、`AppKit` をインポートします。
+
+```swift
+import SwiftUI
+import AppKit
+
+struct CanvasOverayView: View {
+    // 1. キーと画像名の対応表
+    @State private var keyMap: [String: String] = [:]
+    
+    // 2. すべての描画が焼き付けられる、ベースとなる一枚の画像
+    @State private var canvasImage: NSImage?
+    
+    // 3. 利用可能な画像セット（Assets.xcassetsの画像名）
+    let availableImages = ["figure_a", "figure_b", "figure_c", "figure_d"]
+    
+    // キャンバスの初期サイズ（大きめに設定）
+    let canvasSize = CGSize(width: 2000, height: 1500)
+    let stampSize = CGSize(width: 150, height: 150)
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.white // 背景色
+
+                // 4. キャンバス画像が存在すれば表示する
+                if let image = canvasImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                }
+            }
+            .focusable()
+            // macOS 14+ のキー入力キャプチャ
+            .onKeyPress { press in
+                handleKeyPress(press)
+                return .handled
+            }
+            // 初期化時に真っ白なキャンバスを作成
+            .onAppear {
+                if canvasImage == nil {
+                    canvasImage = createEmptyImage(size: canvasSize)
+                }
+            }
+        }
+        // ウィンドウの初期サイズ
+        .frame(minWidth: 1000, minHeight: 800)
+    }
+
+    // --- ロジック部 ---
+
+    private func handleKeyPress(_ press: KeyPress) {
+        let key = press.characters
+        if key.isEmpty { return }
+
+        // 初回のみキーに画像をマップ
+        if keyMap[key] == nil {
+            keyMap[key] = availableImages.randomElement()
+        }
+        
+        guard let imageName = keyMap[key],
+              let stampImage = NSImage(named: imageName) else { return }
+        
+        // ランダムな座標を決定（キャンバスサイズ内）
+        let randomX = CGFloat.random(in: stampSize.width...(canvasSize.width - stampSize.width))
+        let randomY = CGFloat.random(in: stampSize.height...(canvasSize.height - stampSize.height))
+        let rect = CGRect(origin: CGPoint(x: randomX, y: randomY), size: stampSize)
+        
+        // 5. 現在のキャンバスに画像を焼き付ける
+        if let currentCanvas = canvasImage {
+            canvasImage = drawImageOnImage(baseImage: currentCanvas, imageToDraw: stampImage, inRect: rect)
+        }
+    }
+
+    // 真っ白なNSImageを作成するユーティリティ
+    private func createEmptyImage(size: CGSize) -> NSImage {
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor.white.set()
+        NSMakeRect(0, 0, size.width, size.height).fill()
+        image.unlockFocus()
+        return image
+    }
+
+    // 6. 画像に画像を上書き描画して、新しいNSImageを返す関数（ここが肝）
+    private func drawImageOnImage(baseImage: NSImage, imageToDraw: NSImage, inRect rect: CGRect) -> NSImage {
+        // ベース画像のコピーを作成（直接変更を避けるため推奨されるパターン）
+        let newImage = baseImage.copy() as! NSImage
+        
+        newImage.lockFocus() // 描画フォーカスを開始
+        
+        // AppKitのグラフィックスコンテキストを取得
+        if let context = NSGraphicsContext.current?.cgContext {
+            // 必要に応じてアルファブレンドなどを設定可能
+            context.setAlpha(0.8) // 少し透過させて重ねる例
+            
+            // NSImageをCGImageに変換して描画（AppKit座標系に注意が必要な場合があるが、単純描画ならlockFocus内でOK）
+            imageToDraw.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        }
+        
+        newImage.unlockFocus() // 描画フォーカスを終了
+        
+        return newImage // 新しい状態として返す
+    }
+}
+```
+
+### 3. 設計のポイントと解説
+
+この設計では、SwiftUIの `Canvas` ビューそのものではなく、より低レイヤーな `NSImage` の描画コンテキストを利用しています。
+
+1.  **「絵として上書き」の実現**:
+    `drawImageOnImage` 関数が核心です。これは、古い `canvasImage` を受け取り、その上に新しい画像を AppKit の描画機能 (`lockFocus` / `draw`) で書き足し、新しい `NSImage` を生成します。
+2.  **ステートレスな描画**:
+    `canvasImage` という「結果のピクセルデータ」だけを状態として持っています。「どのキーが、どこに、どの画像で」という過去の履歴は配列などに保持していません。キーを押すたびに、現在の絵に新しい絵が「焼き付けられて」いきます。
+3.  **AppKit座標系**:
+    `NSImage` の描画（`lockFocus`）は、デフォルトで左下が原点 (0,0) になります。SwiftUI（左上が原点）と感覚が異なる点に注意が必要ですが、ランダム配置であれば大きな問題にはなりません。
+4.  **パフォーマンス**:
+    キーを押すたびに画像全体のコピーと再描画が発生します。キャンバスサイズ (`canvasSize`) が極端に大きい（例えば16Kなど）場合、動作が重くなる可能性があります。Retinaディスプレイを考慮し、内部的なピクセル解像度を調整する余地があります。
+
+### 実行イメージ
+
+アプリを起動すると白いウィンドウが表示されます。
+例えば 'A' キーを押すと、猫の画像がランダムな位置に描画されます。
+次に 'B' キーを押すと、犬の画像が別のランダムな位置に描画されます（猫はそのまま残っています）。
+もう一度 'A' キーを押すと、再び猫の画像が、以前とは違うランダムな位置に**上書き**描画されます。
+
+これで、データとしては「一枚の絵」しか管理しない、上書き型の実装になります。
