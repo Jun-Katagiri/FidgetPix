@@ -24,7 +24,7 @@ struct CanvasOverlayView: View {
                 if let image = canvasImage {
                     Image(nsImage: image)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .aspectRatio(contentMode: .fit)
                 }
             }
             .focusable()
@@ -58,9 +58,9 @@ struct CanvasOverlayView: View {
         guard let imageName = keyMap[key],
               let stampImage = loadImage(named: imageName) else { return }
 
-        // ランダムな座標を決定（キャンバスサイズ内）
-        let randomX = CGFloat.random(in: stampSize.width...(canvasSize.width - stampSize.width))
-        let randomY = CGFloat.random(in: stampSize.height...(canvasSize.height - stampSize.height))
+        // ランダムな座標を決定（スタンプがキャンバス内に収まるよう上下限を設定）
+        let randomX = CGFloat.random(in: 0...(canvasSize.width - stampSize.width))
+        let randomY = CGFloat.random(in: 0...(canvasSize.height - stampSize.height))
         let rect = CGRect(origin: CGPoint(x: randomX, y: randomY), size: stampSize)
 
         // 5. 現在のキャンバスに画像を焼き付ける
@@ -79,17 +79,16 @@ struct CanvasOverlayView: View {
     }
 
     // 真っ白なNSImageを作成するユーティリティ
-    private func createEmptyImage(size: CGSize) -> NSImage {
-        let image = NSImage(size: size)
-        image.lockFocus()
-        NSColor.white.set()
-        NSMakeRect(0, 0, size.width, size.height).fill()
-        image.unlockFocus()
-        return image
+    private func createEmptyImage(size: CGSize) -> NSImage? {
+        guard let context = makeBitmapContext(size: size) else { return nil }
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+        guard let cgImage = context.makeImage() else { return nil }
+        return NSImage(cgImage: cgImage, size: size)
     }
 
     // プレースホルダー用の色付き矩形画像を生成する
-    private func makePlaceholderImage(name: String, size: CGSize) -> NSImage {
+    private func makePlaceholderImage(name: String, size: CGSize) -> NSImage? {
         let colors: [String: NSColor] = [
             "figure_a": .systemRed,
             "figure_b": .systemBlue,
@@ -97,11 +96,16 @@ struct CanvasOverlayView: View {
             "figure_d": .systemYellow
         ]
         let color = colors[name] ?? .systemGray
-        let image = NSImage(size: size)
-        image.lockFocus()
-        color.withAlphaComponent(0.8).set()
-        NSMakeRect(0, 0, size.width, size.height).fill()
-        // 画像名のラベルを描画してどのキーに対応するかを判別しやすくする
+        guard let context = makeBitmapContext(size: size) else { return nil }
+
+        // 背景色を塗りつぶす
+        context.setFillColor(color.cgColor)
+        context.fill(CGRect(origin: .zero, size: size))
+
+        // 画像名のラベルをCGContextを通じてNSGraphicsContextで描画する
+        let nsContext = NSGraphicsContext(cgContext: context, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = nsContext
         let label = name as NSString
         let attrs: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor.white,
@@ -115,22 +119,47 @@ struct CanvasOverlayView: View {
             height: labelSize.height
         )
         label.draw(in: labelRect, withAttributes: attrs)
-        image.unlockFocus()
-        return image
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let cgImage = context.makeImage() else { return nil }
+        return NSImage(cgImage: cgImage, size: size)
     }
 
     // 6. 画像に画像を上書き描画して、新しいNSImageを返す関数（ここが肝）
     private func drawImageOnImage(baseImage: NSImage, imageToDraw: NSImage, inRect rect: CGRect) -> NSImage {
-        // ベース画像のコピーを作成（直接変更を避けるため推奨されるパターン）
-        let newImage = baseImage.copy() as! NSImage
+        let size = baseImage.size
+        guard let context = makeBitmapContext(size: size) else { return baseImage }
 
-        newImage.lockFocus() // 描画フォーカスを開始
+        // ベース画像を描画（変換失敗時はベース画像をそのまま返す）
+        if let cgBase = baseImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            context.draw(cgBase, in: CGRect(origin: .zero, size: size))
+        } else {
+            return baseImage
+        }
 
-        // NSImageをCGImageに変換して描画
-        imageToDraw.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        // スタンプ画像を指定位置に描画（上書き）。変換失敗時はベース画像をそのまま返す
+        if let cgStamp = imageToDraw.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            context.draw(cgStamp, in: rect)
+        } else {
+            return baseImage
+        }
 
-        newImage.unlockFocus() // 描画フォーカスを終了
+        guard let cgResult = context.makeImage() else { return baseImage }
+        return NSImage(cgImage: cgResult, size: size)
+    }
 
-        return newImage // 新しい状態として返す
+    // ビットマップCGContextを生成するユーティリティ
+    private func makeBitmapContext(size: CGSize) -> CGContext? {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        return CGContext(
+            data: nil,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        )
     }
 }
