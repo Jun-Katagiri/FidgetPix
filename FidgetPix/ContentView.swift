@@ -54,6 +54,12 @@ struct CanvasOverlayView: View {
     // --- ロジック部 ---
 
     private func handleKeyPress(_ press: KeyPress) {
+        // Deleteキーでキャンバスをクリア
+        if press.key == .delete || press.key == .deleteForward {
+            canvasImage = createEmptyImage(size: canvasSize)
+            return
+        }
+
         let key = press.characters
         if key.isEmpty { return }
 
